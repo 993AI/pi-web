@@ -1,12 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useMemo } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
-import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
-import { useTheme } from "@/hooks/useTheme";
+import { MarkdownBody } from "./MarkdownBody";
 import type {
   AgentMessage,
   UserMessage,
@@ -134,7 +129,6 @@ function UserMessageView({ message, entryId, onFork, forking, onNavigate, prevAs
             fontSize: 14,
             lineHeight: 1.6,
             color: "var(--text)",
-            whiteSpace: "pre-wrap",
             wordBreak: "break-word",
           }}
         >
@@ -163,7 +157,7 @@ function UserMessageView({ message, entryId, onFork, forking, onNavigate, prevAs
               })}
             </div>
           )}
-          {content}
+          {content && <MarkdownBody className="markdown-user-message">{content}</MarkdownBody>}
         </div>
 
       </div>
@@ -507,7 +501,7 @@ function AssistantMessageView({
 
 function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCallDurations }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number> }) {
   if (block.type === "text") {
-    return <TextBlock block={block as TextContent} />;
+    return <TextBlock block={block as TextContent} isStreaming={isStreaming} />;
   }
   if (block.type === "thinking") {
     return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} />;
@@ -516,49 +510,13 @@ function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCal
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
-    return <ToolCallBlock block={tc} result={result} isRunning={isStreaming && !result} duration={duration} />;
+    return <ToolCallBlock block={tc} result={result} duration={duration} />;
   }
   return null;
 }
 
-function TextBlock({ block }: { block: TextContent }) {
-  return (
-    <div className="markdown-body">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          code({ className, children, ...props }) {
-            const lang = className?.replace("language-", "") ?? "";
-            const raw = String(children);
-            const isBlock = className?.includes("language-") || raw.includes("\n");
-            if (isBlock) {
-              return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} />;
-            }
-            return (
-              <code
-                style={{
-                  background: "var(--bg-selected)",
-                  padding: "1px 4px",
-                  borderRadius: 3,
-                  fontFamily: "var(--font-mono)",
-                  fontSize: "0.9em",
-                }}
-                {...props}
-              >
-                {children}
-              </code>
-            );
-          },
-          pre({ children }) {
-            // Unwrap <pre> wrapper — CodeBlock handles its own container
-            return <>{children}</>;
-          },
-        }}
-      >
-        {block.text}
-      </ReactMarkdown>
-    </div>
-  );
+function TextBlock({ block, isStreaming }: { block: TextContent; isStreaming?: boolean }) {
+  return <MarkdownBody isStreaming={isStreaming}>{block.text}</MarkdownBody>;
 }
 
 function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?: number }) {
@@ -613,7 +571,7 @@ function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?:
 }
 
 
-function ToolCallBlock({ block, result, isRunning, duration }: { block: ToolCallContent; result?: ToolResultMessage; isRunning?: boolean; duration?: number }) {
+function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number }) {
   const [expanded, setExpanded] = useState(false);
   const inputStr = JSON.stringify(block.input, null, 2);
 
@@ -764,76 +722,3 @@ function formatUsage(usage: {
   if (usage.cost?.total) parts.push(`$${usage.cost.total.toFixed(4)}`);
   return parts.join(" · ");
 }
-
-
-
-function CodeBlock({ code, lang }: { code: string; lang: string }) {
-  const { isDark } = useTheme();
-  const [copied, setCopied] = useState(false);
-
-  const copy = () => {
-    copyText(code).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  };
-
-  return (
-    <div
-      style={{
-        position: "relative",
-        marginTop: 4,
-        marginBottom: 4,
-        borderRadius: 6,
-        overflow: "hidden",
-        border: "1px solid var(--border)",
-      }}
-    >
-      <div
-        style={{
-          padding: "3px 10px",
-          background: "var(--bg-panel)",
-          borderBottom: "1px solid var(--border)",
-          fontSize: 11,
-          color: "var(--text-dim)",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
-        <span>{lang}</span>
-        <button
-          onClick={copy}
-          style={{
-            background: "none",
-            border: "none",
-            color: "var(--text-muted)",
-            cursor: "pointer",
-            fontSize: 11,
-          }}
-        >
-          {copied ? "copied" : "copy"}
-        </button>
-      </div>
-      <SyntaxHighlighter
-        language={lang || "text"}
-        style={isDark ? vscDarkPlus : vs}
-        showLineNumbers
-        lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
-        customStyle={{
-          margin: 0,
-          padding: "10px 12px",
-          fontSize: 12.5,
-          lineHeight: 1.6,
-          borderRadius: 0,
-          background: "var(--bg)",
-        }}
-        codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
-      >
-        {code}
-      </SyntaxHighlighter>
-    </div>
-  );
-}
-
-

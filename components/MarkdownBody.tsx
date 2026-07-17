@@ -1,39 +1,24 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { useTheme } from "@/hooks/useTheme";
+import { copyText } from "@/lib/clipboard";
+import { resolveLocalFileHref } from "@/lib/file-links";
 import { markdownRehypePlugins, markdownRemarkPlugins } from "@/lib/markdown";
 
 interface MarkdownBodyProps {
   children: string;
   className?: string;
   isStreaming?: boolean;
+  cwd?: string;
+  onOpenFile?: (filePath: string) => void;
 }
 
-function copyText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(text);
-  }
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand("copy");
-    document.body.removeChild(ta);
-    return Promise.resolve();
-  } catch {
-    return Promise.reject();
-  }
-}
-
-export function MarkdownBody({ children, className, isStreaming }: MarkdownBodyProps) {
+export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
 
   return (
@@ -54,13 +39,7 @@ export function MarkdownBody({ children, className, isStreaming }: MarkdownBodyP
             }
             return (
               <code
-                style={{
-                  background: "var(--bg-selected)",
-                  padding: "1px 4px",
-                  borderRadius: 3,
-                  fontFamily: "var(--font-mono)",
-                  fontSize: "0.9em",
-                }}
+                className="markdown-inline-code"
                 {...props}
               >
                 {children}
@@ -69,6 +48,41 @@ export function MarkdownBody({ children, className, isStreaming }: MarkdownBodyP
           },
           pre({ children }) {
             return <>{children}</>;
+          },
+          a({ href, children, ...props }) {
+            // `node` is react-markdown metadata, not a DOM attribute.
+            delete props.node;
+            const filePath = onOpenFile ? resolveLocalFileHref(href, cwd) : null;
+            const openFile = onOpenFile;
+            if (!filePath || !openFile) {
+              return (
+                <a href={href} {...props} target="_blank" rel="noopener noreferrer">
+                  {children}
+                </a>
+              );
+            }
+
+            const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+              if (event.defaultPrevented || event.button !== 0) return;
+              if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              const target = event.currentTarget.getAttribute("target");
+              if (target && target !== "_self") return;
+              event.preventDefault();
+              openFile(filePath);
+            };
+
+            return (
+              <a href={href} {...props} onClick={handleClick}>
+                {children}
+              </a>
+            );
+          },
+          table({ children }) {
+            return (
+              <div className="markdown-table-wrap">
+                <table>{children}</table>
+              </div>
+            );
           },
         }}
       >
@@ -158,15 +172,7 @@ function MermaidBlock({ code, isStreaming }: { code: string; isStreaming?: boole
       onClick={() => setShowPreview((v) => !v)}
       disabled={isStreaming}
       title={isStreaming ? "Preview available after streaming" : (showPreview ? "Show Mermaid source" : "Preview Mermaid diagram")}
-      style={{
-        background: showPreview ? "var(--bg-selected)" : "none",
-        border: "1px solid var(--border)",
-        color: isStreaming ? "var(--text-dim)" : "var(--text-muted)",
-        cursor: isStreaming ? "not-allowed" : "pointer",
-        fontSize: 11,
-        borderRadius: 4,
-        padding: "1px 6px",
-      }}
+      className={["markdown-code-action", showPreview ? "is-active" : ""].filter(Boolean).join(" ")}
     >
       {showPreview ? "Source" : "Preview"}
     </button>
@@ -189,29 +195,9 @@ function MermaidBlock({ code, isStreaming }: { code: string; isStreaming?: boole
     );
 
   return (
-    <div
-      style={{
-        position: "relative",
-        marginTop: 4,
-        marginBottom: 4,
-        borderRadius: 6,
-        overflow: "hidden",
-        border: "1px solid var(--border)",
-      }}
-    >
-      <div
-        style={{
-          padding: "3px 10px",
-          background: "var(--bg-panel)",
-          borderBottom: "1px solid var(--border)",
-          fontSize: 11,
-          color: "var(--text-dim)",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
-        <span>mermaid</span>
+    <div className="markdown-code-block">
+      <div className="markdown-code-header">
+        <span className="markdown-code-lang">mermaid</span>
         {previewButton}
       </div>
       {body}
@@ -231,40 +217,14 @@ function CodeBlock({ code, lang, headerAction }: { code: string; lang: string; h
   };
 
   return (
-    <div
-      style={{
-        position: "relative",
-        marginTop: 4,
-        marginBottom: 4,
-        borderRadius: 6,
-        overflow: "hidden",
-        border: "1px solid var(--border)",
-      }}
-    >
-      <div
-        style={{
-          padding: "3px 10px",
-          background: "var(--bg-panel)",
-          borderBottom: "1px solid var(--border)",
-          fontSize: 11,
-          color: "var(--text-dim)",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
-        <span>{lang}</span>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+    <div className="markdown-code-block">
+      <div className="markdown-code-header">
+        <span className="markdown-code-lang">{lang || "text"}</span>
+        <div className="markdown-code-actions">
           {headerAction}
           <button
             onClick={copy}
-            style={{
-              background: "none",
-              border: "none",
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 11,
-            }}
+            className="markdown-code-action"
           >
             {copied ? "copied" : "copy"}
           </button>
@@ -277,11 +237,11 @@ function CodeBlock({ code, lang, headerAction }: { code: string; lang: string; h
         lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
         customStyle={{
           margin: 0,
-          padding: "10px 12px",
+          padding: "11px 13px",
           fontSize: 12.5,
-          lineHeight: 1.6,
+          lineHeight: 1.62,
           borderRadius: 0,
-          background: "var(--bg)",
+          background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
         }}
         codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
       >

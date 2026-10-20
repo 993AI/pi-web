@@ -1,42 +1,21 @@
+import { existsSync } from "fs";
 import { stat } from "fs/promises";
 import { resolve } from "path";
 import { createAgentSessionServices, getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
-import { loadModelsWithCache, type ModelsData } from "@/lib/models-cache";
+import {
+  loadModelsWithCache,
+  withModelRuntimeError,
+  withSafeModelLoadFailure,
+  type ModelsData,
+} from "@/lib/models-cache";
+import { orderSelectorModels, resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
+import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { projectTrustReloadOptions } from "@/lib/project-trust";
+import { rememberProviderModels, withDeferredProviderModels } from "@/lib/deferred-provider-models";
+import { inferRemovedWorktree } from "@/lib/worktree";
 
 export const dynamic = "force-dynamic";
-
-const modelNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-
-function compareModelEntries(
-  a: { id: string; name: string; provider: string },
-  b: { id: string; name: string; provider: string }
-): number {
-  return modelNameCollator.compare(a.name || a.id, b.name || b.id)
-    || modelNameCollator.compare(a.provider, b.provider)
-    || modelNameCollator.compare(a.id, b.id);
-}
-
-const THINKING_SUFFIXES = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-
-function stripThinkingSuffix(modelRef: string): string {
-  const trimmed = modelRef.trim();
-  const colonIndex = trimmed.lastIndexOf(":");
-  if (colonIndex === -1) return trimmed;
-  const suffix = trimmed.substring(colonIndex + 1);
-  return THINKING_SUFFIXES.has(suffix) ? trimmed.substring(0, colonIndex) : trimmed;
-}
-
-function filterByExactEnabledModels<T extends { id: string; provider: string }>(
-  available: readonly T[],
-  enabledModels: string[] | undefined,
-): readonly T[] {
-  if (!enabledModels || enabledModels.length === 0) return available;
-
-  const refs = new Set(enabledModels.map(stripThinkingSuffix).filter(Boolean));
-  const visible = available.filter((m) => refs.has(`${m.provider}/${m.id}`) || refs.has(m.id));
-  return visible.length > 0 ? visible : available;
-}
 
 async function loadModels(cwd: string): Promise<ModelsData> {
   const nameMap = new Map<string, string>();
@@ -46,16 +25,31 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   const thinkingLevelMaps: Record<string, Record<string, string | null>> = {};
 
   const agentDir = getAgentDir();
-  const services = await createAgentSessionServices({ cwd, agentDir });
-  const available = await services.modelRuntime.getAvailable();
+  // Gate untrusted project extensions: enumerating models still imports and
+  // runs a repository's .pi/extensions factories, so honor project trust here
+  // too (see lib/project-trust.ts, #236).
+  const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
+  const services = await createAgentSessionServices({
+    cwd,
+    agentDir,
+    ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
+  });
+  const modelError = services.modelRuntime.getError();
   const settings: SettingsManager = services.settingsManager;
-  const enabledModels = settings.getEnabledModels();
-  const visible = filterByExactEnabledModels(available, enabledModels);
-  modelList = visible.map((m: { id: string; name: string; provider: string }) => ({
+  await rememberProviderModels(services.modelRuntime);
+  // `enabledModels` supports globs and fuzzy patterns, so resolve it the same
+  // way the CLI does instead of comparing pattern strings literally (#307).
+  const scope = await resolveVisibleModels(
+    withDeferredProviderModels(services.modelRuntime),
+    settings.getEnabledModels(),
+  );
+  const { visible, thinkingLevelPins, warnings } = scope;
+  modelList = orderSelectorModels(scope).map((m) => ({
     id: m.id,
     name: m.name,
     provider: m.provider,
-  })).sort(compareModelEntries);
+    input: m.input,
+  }));
   for (const m of visible) {
     const key = `${m.provider}:${m.id}`;
     nameMap.set(key, m.name);
@@ -63,26 +57,61 @@ async function loadModels(cwd: string): Promise<ModelsData> {
     if (m.thinkingLevelMap) thinkingLevelMaps[key] = m.thinkingLevelMap;
   }
 
-  const provider = settings.getDefaultProvider();
-  const modelId = settings.getDefaultModel();
-  if (provider && modelId && visible.some((m) => m.provider === provider && m.id === modelId)) {
-    defaultModel = { provider, modelId };
+  const defaultProvider = settings.getDefaultProvider();
+  const defaultModelId = settings.getDefaultModel();
+  const initial = selectInitialModelScope(scope, {
+    ...(defaultProvider && defaultModelId
+      ? { defaultModel: { provider: defaultProvider, modelId: defaultModelId } }
+      : {}),
+  });
+  if (initial.model) {
+    defaultModel = { provider: initial.model.provider, modelId: initial.model.id };
   }
+  const defaultThinkingLevel = initial.thinkingLevel
+    ?? (initial.model
+      ? settings.getModelThinkingLevel(initial.model.provider, initial.model.id)
+      : undefined)
+    ?? settings.getDefaultThinkingLevel()
+    ?? null;
 
-  return { models: Object.fromEntries(nameMap), modelList, defaultModel, thinkingLevels, thinkingLevelMaps };
+  return withModelRuntimeError(
+    {
+      models: Object.fromEntries(nameMap),
+      modelList,
+      defaultModel,
+      defaultThinkingLevel,
+      savedDefaultThinkingLevel: settings.getDefaultThinkingLevel() ?? null,
+      thinkingLevels,
+      thinkingLevelMaps,
+      thinkingLevelPins,
+      ...(warnings.length > 0 ? { modelScopeWarnings: warnings } : {}),
+    },
+    modelError,
+  );
 }
 
 const EMPTY_MODELS: ModelsData = {
   models: {},
   modelList: [],
   defaultModel: null,
+  defaultThinkingLevel: null,
+  savedDefaultThinkingLevel: null,
   thinkingLevels: {},
   thinkingLevelMaps: {},
+  thinkingLevelPins: {},
 };
 
 export async function GET(req: Request) {
-  const requestedCwd = new URL(req.url).searchParams.get("cwd") || process.cwd();
-  const cwd = resolve(requestedCwd);
+  const requestedCwd = resolve(new URL(req.url).searchParams.get("cwd") || process.cwd());
+  // A subagent run isolated in a worktree has that worktree removed when the run
+  // finishes, yet its session file still records the worktree as its cwd. Fall back
+  // to the main repo it branched from, so opening a finished subagent resolves the
+  // same models a non-isolated one would. The roots check below runs on the folder
+  // actually answered from, so the fallback reaches no project that was not allowed
+  // by name already.
+  const cwd = existsSync(requestedCwd)
+    ? requestedCwd
+    : inferRemovedWorktree(requestedCwd)?.projectRoot ?? requestedCwd;
 
   let cwdStat;
   try {
@@ -93,10 +122,14 @@ export async function GET(req: Request) {
   if (!cwdStat.isDirectory()) {
     return Response.json({ error: `Not a directory: ${cwd}` }, { status: 400 });
   }
+  const allowedRoots = await getAllowedFileRoots();
+  if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
+    return Response.json({ error: "Access denied" }, { status: 403 });
+  }
 
   try {
     return Response.json(await loadModelsWithCache(cwd, () => loadModels(cwd)));
   } catch {
-    return Response.json(EMPTY_MODELS);
+    return Response.json(withSafeModelLoadFailure(EMPTY_MODELS));
   }
 }

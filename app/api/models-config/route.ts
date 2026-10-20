@@ -1,43 +1,32 @@
 import { NextResponse } from "next/server";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import { join, dirname } from "path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { invalidateModelsCache } from "@/lib/models-cache";
+import { ModelsConfigReadError, readModelsConfig, writeModelsConfig } from "@/lib/models-config-store";
+import { ContextWindowError, normalizeContextWindowOverrides } from "@/lib/model-context";
 
 export const dynamic = "force-dynamic";
 
-function getModelsPath(): string {
-  return join(getAgentDir(), "models.json");
-}
-
-function readModelsJson(): Record<string, unknown> {
-  const path = getModelsPath();
-  if (!existsSync(path)) return { providers: {} };
-  try {
-    return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-  } catch {
-    return { providers: {} };
-  }
-}
-
-function writeModelsJson(data: Record<string, unknown>): void {
-  const path = getModelsPath();
-  const dir = dirname(path);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(path, JSON.stringify(data, null, 2), "utf8");
-}
-
 export async function GET() {
-  return NextResponse.json(readModelsJson());
+  try {
+    return NextResponse.json(readModelsConfig());
+  } catch (error) {
+    if (error instanceof ModelsConfigReadError) {
+      return NextResponse.json({ error: error.message }, { status: 422 });
+    }
+    return NextResponse.json({ error: String(error) }, { status: 500 });
+  }
 }
 
 export async function PUT(req: Request) {
   try {
     const body = await req.json() as Record<string, unknown>;
-    writeModelsJson(body);
-    invalidateModelsCache();
+    writeModelsConfig(normalizeContextWindowOverrides(body));
     return NextResponse.json({ success: true });
   } catch (error) {
+    if (error instanceof ContextWindowError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+    if (error instanceof ModelsConfigReadError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
 }
